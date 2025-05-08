@@ -1,0 +1,5 @@
+flask==2.0.1
+firebase-admin==5.0.3
+livekit==0.1.0
+PyJWT==2.3.0
+python-dotenv==0.19.0 
