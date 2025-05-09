@@ -216,7 +216,6 @@ class SimpleAgent:
         self.is_connected = False
         self.loop = loop or asyncio.get_event_loop()
         
-        # Add a cache to track pending questions and avoid duplicates
         self.pending_questions = {}
 
         try:
@@ -231,8 +230,7 @@ class SimpleAgent:
         
         self.knowledge_base = self.load_knowledge_base()
         self.response_queue = asyncio.Queue()
-        
-        # Properly set up the listener
+
         self.setup_resolved_requests_listener()
         
         self.last_kb_refresh = datetime.utcnow()
@@ -257,7 +255,7 @@ class SimpleAgent:
 
     def setup_resolved_requests_listener(self):
         """Set up a listener for resolved help requests."""
-        # Create a callback function to process document changes
+
         def on_snapshot(doc_snapshot, changes, read_time):
             logger.info(f"Received Firebase update: {len(changes)} changes")
             for change in changes:
@@ -271,12 +269,12 @@ class SimpleAgent:
                             logger.info(f"Processing resolved request: {doc.id}")
                             self.update_knowledge_base(data['question'], data['answer'])
                             
-                            # Update the pending questions cache
+                            
                             question_key = f"{data['question'].lower()}:{data['caller_id']}"
                             if question_key in self.pending_questions:
                                 del self.pending_questions[question_key]
                             
-                            # Schedule the coroutine on the loop
+                            
                             asyncio.run_coroutine_threadsafe(
                                 self.send_response_to_caller(
                                     data['answer'],
@@ -287,7 +285,7 @@ class SimpleAgent:
                 except Exception as e:
                     logger.error(f"Error processing Firebase change: {e}")
         
-        # Set up the listener on both pending and resolved states to catch transitions
+
         pending_query = self.help_requests_ref.where('status', '==', 'pending')
         pending_query.on_snapshot(on_snapshot)
         
@@ -316,7 +314,7 @@ class SimpleAgent:
         except Exception as e:
             logger.error(f"Error sending response to caller {caller_id}: {e}")
             
-            # Queue the response for retry
+        
             self.response_queue.put_nowait({
                 "text": answer,
                 "caller_id": caller_id
@@ -453,15 +451,14 @@ class SimpleAgent:
             caller_id = data.get("caller_id", "unknown")
             logger.info(f"Processing query: {query}")
             
-            # Check if this is a repeated question that's already pending
+           
             question_key = f"{query}:{caller_id}"
             if question_key in self.pending_questions:
                 pending_since = self.pending_questions[question_key]
-                # If the question was asked within the last 5 minutes, don't create a new request
+              
                 if datetime.utcnow() - pending_since < timedelta(minutes=5):
                     return "I've already asked my supervisor about this. I'll let you know as soon as I receive a response."
             
-            # Check for direct matches in knowledge base
             if 'hours' in query and 'hours' in self.knowledge_base:
                 return self.knowledge_base['hours']
             elif ('location' in query or 'where' in query) and 'location' in self.knowledge_base:
@@ -471,7 +468,6 @@ class SimpleAgent:
             elif ('service' in query or 'offer' in query) and 'services' in self.knowledge_base:
                 return self.knowledge_base['services']
             
-            # Check for fuzzy matches in knowledge base
             query_words = set(query.split())
             best_match = None
             best_match_score = 0
@@ -499,16 +495,14 @@ class SimpleAgent:
                 logger.info(f"Found matching answer with score: {best_match_score}")
                 return best_match
             
-            # Check for substring matches
+
             for key, answer in self.knowledge_base.items():
                 if key in query:
                     logger.info(f"Found substring match for key: {key}")
                     return answer
-            
-            # Create help request if no match found
+
             try:
                 help_request = await self.create_help_request(query, caller_id)
-                # Add to pending questions cache
                 self.pending_questions[question_key] = datetime.utcnow()
                 logger.info(f"Created help request: {help_request.to_dict()}")
                 return "Let me check with my supervisor and get back to you."
@@ -545,11 +539,10 @@ class SimpleAgent:
             if await self.connect():
                 self.setup_handlers()
                 logger.info("Agent is live – press Ctrl+C to exit.")
-                
-                # Start the response processor
+               
                 response_processor = asyncio.create_task(self.process_response_queue())
                 
-                # Start the timeout checker
+             
                 timeout_checker = asyncio.create_task(self.check_timeouts())
                 
                 while self.is_connected:
@@ -559,7 +552,7 @@ class SimpleAgent:
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
         finally:
-            # Clean up tasks
+   
             if 'response_processor' in locals() and not response_processor.done():
                 response_processor.cancel()
             if 'timeout_checker' in locals() and not timeout_checker.done():
@@ -585,7 +578,7 @@ class SimpleAgent:
                             'updated_at': now.isoformat()
                         })
                         
-                        # Remove from pending questions cache
+   
                         question_key = f"{data['question'].lower()}:{data['caller_id']}"
                         if question_key in self.pending_questions:
                             del self.pending_questions[question_key]
@@ -598,10 +591,10 @@ class SimpleAgent:
                             reliable=True
                         )
                 
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(60)  
             except Exception as e:
                 logger.error(f"Error checking timeouts: {e}")
-                await asyncio.sleep(60)  # Still wait before retrying
+                await asyncio.sleep(60)
 
 # ---------------------------------------------------------------------------
 # Interactive Client Implementation

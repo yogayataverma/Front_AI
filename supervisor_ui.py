@@ -16,6 +16,7 @@ from functools import lru_cache
 from celery import Celery
 from tenacity import retry, stop_after_attempt
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("supervisor_app")
 
@@ -35,7 +36,7 @@ class SimpleAgent:
         self.help_requests_ref = help_requests_ref
         self.knowledge_base_ref = knowledge_base_ref
         self.knowledge_base = {}
-        self.pending_questions = {}  # Track questions that are already pending
+        self.pending_questions = {} 
         self.setup_resolved_requests_listener()
 
     def setup_resolved_requests_listener(self):
@@ -49,7 +50,7 @@ class SimpleAgent:
                     if data.get('status') == 'resolved' and 'answer' in data:
                         self.update_knowledge_base(data['question'], data['answer'])
                         
-                        # Use the loop that was passed in during initialization
+                      
                         asyncio.run_coroutine_threadsafe(
                             self.send_response_to_caller(
                                 data['answer'], 
@@ -58,7 +59,7 @@ class SimpleAgent:
                             self.loop
                         )
         
-        # Actually set up the listener
+       
         self.help_requests_ref.where('status', '==', 'pending').on_snapshot(on_snapshot)
 
     async def _process_message(self, message: str) -> str:
@@ -71,7 +72,7 @@ class SimpleAgent:
             caller_id = data.get("caller_id", "unknown")
             logger.info(f"Processing query: {query}")
             
-            # First check if we already have an answer in the knowledge base
+           
             if 'hours' in query and 'hours' in self.knowledge_base:
                 return self.knowledge_base['hours']
             elif ('location' in query or 'where' in query) and 'location' in self.knowledge_base:
@@ -81,18 +82,18 @@ class SimpleAgent:
             elif ('service' in query or 'offer' in query) and 'services' in self.knowledge_base:
                 return self.knowledge_base['services']
             
-            # Check if this is a repeated question that's already pending
+            
             question_key = f"{query}:{caller_id}"
             if question_key in self.pending_questions:
                 pending_since = self.pending_questions[question_key]
-                # If the question was asked within the last 5 minutes, don't create a new request
+             
                 if datetime.utcnow() - pending_since < timedelta(minutes=5):
                     return "I've already asked my supervisor about this. I'll let you know as soon as I receive a response."
             
-            # Create help request if no answer found
+            
             try:
                 help_request = await self.create_help_request(query, caller_id)
-                # Add to pending questions cache
+                
                 self.pending_questions[question_key] = datetime.utcnow()
                 logger.info(f"Created help request: {help_request.to_dict()}")
                 return "Let me check with my supervisor and get back to you."
@@ -163,10 +164,10 @@ class SimpleAgent:
     async def send_response_to_caller(self, answer: str, caller_id: str):
         """Send response back to the caller."""
         logger.info(f"TEXTING CALLER {caller_id}: {answer}")
-        # Implement actual messaging logic here
+        
 
 app = Flask(__name__)
-app.secret_key = 'your_secret_key_here'  # Add a secret key for flash messages
+app.secret_key = 'your_secret_key_here' 
 
 limiter = Limiter(
     get_remote_address,
@@ -176,12 +177,12 @@ limiter = Limiter(
 
 celery = Celery('tasks', broker='redis://localhost:6379/0')
 
-# Initialize the agent
+
 agent = SimpleAgent()
 
 @app.route('/')
 def index():
-    # Add error handling here
+
     try:
         requests = help_requests_ref.order_by('created_at', direction=firestore.Query.DESCENDING).stream()
         requests_list = [doc.to_dict() for doc in requests]
@@ -217,7 +218,6 @@ def submit_answer():
             flash('Missing request ID or answer', 'error')
             return redirect(url_for('index'))
         
-        # Add debug logging
         logger.info(f"Processing answer submission for request {request_id}")
         
         help_request_ref = help_requests_ref.document(request_id)
@@ -229,18 +229,17 @@ def submit_answer():
             
         request_data = request_doc.to_dict()
         
-        # Update the help request with the answer
         help_request_ref.update({
             'status': 'resolved',
             'answer': answer,
             'resolved_at': datetime.utcnow().isoformat(),
             'updated_at': datetime.utcnow().isoformat(),
-            'supervisor_id': 'web-admin'  # Add supervisor ID
+            'supervisor_id': 'web-admin'
         })
         
         logger.info(f"Updated help request {request_id} with answer")
         
-        # Update knowledge base
+
         question = request_data['question'].lower()
         if 'hours' in question:
             key = 'hours'
@@ -318,7 +317,7 @@ def update_help_request(request_id, data):
         raise
 
 if __name__ == '__main__':
-    # Start the event loop in a separate thread for the agent
+
     import threading
     def run_agent_loop():
         asyncio.set_event_loop(agent.loop)
@@ -327,5 +326,5 @@ if __name__ == '__main__':
     agent_thread = threading.Thread(target=run_agent_loop, daemon=True)
     agent_thread.start()
     
-    # Run the Flask app
+
     app.run(debug=True, port=5000) 
