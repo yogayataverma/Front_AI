@@ -211,16 +211,17 @@ class HelpRequest:
 # ---------------------------------------------------------------------------
 
 class SimpleAgent:
-    def __init__(self):
+    def __init__(self, loop=None):
         self.room = rtc.Room()
         self.is_connected = False
+        self.loop = loop or asyncio.get_event_loop()
         
+        # Add a cache to track pending questions and avoid duplicates
+        self.pending_questions = {}
 
         try:
-
             firebase_admin.get_app()
         except ValueError:
-
             cred = credentials.Certificate('service.json')
             firebase_admin.initialize_app(cred)
         
@@ -228,15 +229,12 @@ class SimpleAgent:
         self.help_requests_ref = self.db.collection('help_requests')
         self.knowledge_base_ref = self.db.collection('knowledge_base')
         
-
         self.knowledge_base = self.load_knowledge_base()
-
         self.response_queue = asyncio.Queue()
         
-
+        # Properly set up the listener
         self.setup_resolved_requests_listener()
         
-
         self.last_kb_refresh = datetime.utcnow()
         self.kb_refresh_interval = timedelta(minutes=5)
 
@@ -257,43 +255,58 @@ class SimpleAgent:
             'updated_at': datetime.utcnow().isoformat()
         })
 
-    
     def setup_resolved_requests_listener(self):
-        """Set up a listener for resolved help requests to update knowledge base."""
+        """Set up a listener for resolved help requests."""
+        # Create a callback function to process document changes
         def on_snapshot(doc_snapshot, changes, read_time):
+            logger.info(f"Received Firebase update: {len(changes)} changes")
             for change in changes:
-                if change.type.name == 'MODIFIED':
-                    doc = change.document
-                    data = doc.to_dict()
-                    if data.get('status') == 'resolved' and 'answer' in data:
-
-                        self.update_knowledge_base(data['question'], data['answer'])
+                try:
+                    if change.type.name == 'MODIFIED':
+                        doc = change.document
+                        data = doc.to_dict()
+                        logger.info(f"Document changed: {doc.id}, status: {data.get('status')}")
                         
-                        if 'caller_id' in data:
-                            logger.info(f"Queuing response for caller: {data['caller_id']}")
-                            asyncio.create_task(self.send_response_to_caller(
-                                data['answer'],
-                                data['caller_id']
-                            ))
-                        else:
-                            logger.error(f"No caller_id found in resolved request: {doc.id}")
-
-
-        self.help_requests_ref.on_snapshot(on_snapshot)
+                        if data.get('status') == 'resolved' and 'answer' in data:
+                            logger.info(f"Processing resolved request: {doc.id}")
+                            self.update_knowledge_base(data['question'], data['answer'])
+                            
+                            # Update the pending questions cache
+                            question_key = f"{data['question'].lower()}:{data['caller_id']}"
+                            if question_key in self.pending_questions:
+                                del self.pending_questions[question_key]
+                            
+                            # Schedule the coroutine on the loop
+                            asyncio.run_coroutine_threadsafe(
+                                self.send_response_to_caller(
+                                    data['answer'],
+                                    data['caller_id']
+                                ),
+                                self.loop
+                            )
+                except Exception as e:
+                    logger.error(f"Error processing Firebase change: {e}")
+        
+        # Set up the listener on both pending and resolved states to catch transitions
+        pending_query = self.help_requests_ref.where('status', '==', 'pending')
+        pending_query.on_snapshot(on_snapshot)
+        
+        resolved_query = self.help_requests_ref.where('status', '==', 'resolved')
+        resolved_query.on_snapshot(on_snapshot)
+        
+        logger.info("Firebase listeners set up successfully")
 
     async def send_response_to_caller(self, answer: str, caller_id: str):
         """Send a response directly to the caller who asked the question."""
         try:
-
             participants = self.room.participants
+            logger.info(f"Sending response to caller {caller_id}")
             
-
             response_data = {
                 "text": answer,
                 "caller_id": caller_id
             }
             
-
             await self.room.local_participant.publish_data(
                 json.dumps(response_data).encode(),
                 reliable=True
@@ -303,6 +316,7 @@ class SimpleAgent:
         except Exception as e:
             logger.error(f"Error sending response to caller {caller_id}: {e}")
             
+            # Queue the response for retry
             self.response_queue.put_nowait({
                 "text": answer,
                 "caller_id": caller_id
@@ -310,32 +324,30 @@ class SimpleAgent:
             
     def update_knowledge_base(self, question: str, answer: str):
         """Update the knowledge base with new information."""
-        
-        question_lower = question.lower()
-        
-        
-        words = question_lower.split()
-        
+        try:
+            question_lower = question.lower()
+            
+            words = question_lower.split()
+            
+            question_words = {'what', 'when', 'where', 'who', 'why', 'how', 'do', 'does', 'is', 'are', 'can', 'could', 'would', 'should'}
+            meaningful_words = [w for w in words if w not in question_words]
+            
+            if 'hours' in question_lower:
+                key = 'hours'
+            elif 'location' in question_lower or 'where' in question_lower:
+                key = 'location'
+            elif 'price' in question_lower or 'cost' in question_lower:
+                key = 'pricing'
+            elif 'service' in question_lower or 'offer' in question_lower:
+                key = 'services'
+            else:
+                key = ' '.join(meaningful_words[:2]) if meaningful_words else ' '.join(words[:2])
 
-        question_words = {'what', 'when', 'where', 'who', 'why', 'how', 'do', 'does', 'is', 'are', 'can', 'could', 'would', 'should'}
-        meaningful_words = [w for w in words if w not in question_words]
-        
-
-        if 'hours' in question_lower:
-            key = 'hours'
-        elif 'location' in question_lower or 'where' in question_lower:
-            key = 'location'
-        elif 'price' in question_lower or 'cost' in question_lower:
-            key = 'pricing'
-        elif 'service' in question_lower or 'offer' in question_lower:
-            key = 'services'
-        else:
-
-            key = ' '.join(meaningful_words[:2]) if meaningful_words else ' '.join(words[:2])
-
-        self.knowledge_base[key] = answer
-        self.save_knowledge_base_entry(key, answer)
-        logger.info(f"Updated knowledge base entry for '{key}'")
+            self.knowledge_base[key] = answer
+            self.save_knowledge_base_entry(key, answer)
+            logger.info(f"Updated knowledge base entry for '{key}'")
+        except Exception as e:
+            logger.error(f"Error updating knowledge base: {e}")
 
     async def connect(self):
         """Connect to LiveKit room."""
@@ -365,14 +377,12 @@ class SimpleAgent:
         """Create a new help request in Firebase and notify supervisor."""
         help_request = HelpRequest(question, caller_id)
         
-        
         try:
             self.help_requests_ref.document(help_request.id).set(help_request.to_dict())
             logger.info(f"Help request stored in Firebase with ID: {help_request.id}")
         except Exception as e:
             logger.error(f"Failed to store help request in Firebase: {e}")
             raise
-        
         
         logger.info(f"SUPERVISOR NOTIFICATION: Hey, I need help answering: '{question}'")
         
@@ -403,12 +413,10 @@ class SimpleAgent:
                 message = message_bytes.decode('utf-8')
                 logger.info(f"Received message: {message}")
                 
-                
                 async def process_and_respond():
                     try:
                         response = await self._process_message(message)
                         logger.info(f"Generated response: {response}")
-                        
                         
                         await self.room.local_participant.publish_data(
                             json.dumps({"text": response}).encode(),
@@ -418,7 +426,6 @@ class SimpleAgent:
                     except Exception as e:
                         logger.error(f"Error in async processing: {e}")
 
-                
                 asyncio.create_task(process_and_respond())
                 
             except Exception as e:
@@ -439,7 +446,6 @@ class SimpleAgent:
     async def _process_message(self, message: str) -> str:
         """Process incoming message and return appropriate response."""
         try:
-            
             await self.refresh_knowledge_base()
             
             data = json.loads(message)
@@ -447,11 +453,15 @@ class SimpleAgent:
             caller_id = data.get("caller_id", "unknown")
             logger.info(f"Processing query: {query}")
             
+            # Check if this is a repeated question that's already pending
+            question_key = f"{query}:{caller_id}"
+            if question_key in self.pending_questions:
+                pending_since = self.pending_questions[question_key]
+                # If the question was asked within the last 5 minutes, don't create a new request
+                if datetime.utcnow() - pending_since < timedelta(minutes=5):
+                    return "I've already asked my supervisor about this. I'll let you know as soon as I receive a response."
             
-            best_match = None
-            best_match_score = 0
-            
-            
+            # Check for direct matches in knowledge base
             if 'hours' in query and 'hours' in self.knowledge_base:
                 return self.knowledge_base['hours']
             elif ('location' in query or 'where' in query) and 'location' in self.knowledge_base:
@@ -461,19 +471,17 @@ class SimpleAgent:
             elif ('service' in query or 'offer' in query) and 'services' in self.knowledge_base:
                 return self.knowledge_base['services']
             
+            # Check for fuzzy matches in knowledge base
             query_words = set(query.split())
+            best_match = None
+            best_match_score = 0
             
             for key, answer in self.knowledge_base.items():
-            
                 key_words = set(key.split())
-                
-                
                 common_words = query_words.intersection(key_words)
                 
                 if common_words:
-                
                     score = len(common_words) / max(len(query_words), len(key_words))
-                    
                     
                     if key in query:
                         score += 0.3
@@ -487,21 +495,21 @@ class SimpleAgent:
                         best_match_score = score
                         best_match = answer
             
-            
             if best_match and best_match_score > 0.2:
                 logger.info(f"Found matching answer with score: {best_match_score}")
                 return best_match
             
+            # Check for substring matches
+            for key, answer in self.knowledge_base.items():
+                if key in query:
+                    logger.info(f"Found substring match for key: {key}")
+                    return answer
             
-            if not best_match:
-                for key, answer in self.knowledge_base.items():
-                    if key in query:
-                        logger.info(f"Found substring match for key: {key}")
-                        return answer
-            
-            
+            # Create help request if no match found
             try:
                 help_request = await self.create_help_request(query, caller_id)
+                # Add to pending questions cache
+                self.pending_questions[question_key] = datetime.utcnow()
                 logger.info(f"Created help request: {help_request.to_dict()}")
                 return "Let me check with my supervisor and get back to you."
             except Exception as e:
@@ -519,15 +527,17 @@ class SimpleAgent:
         """Process responses from the queue."""
         while self.is_connected:
             try:
-                response = await self.response_queue.get()
-                await self.room.local_participant.publish_data(
-                    json.dumps(response).encode(),
-                    reliable=True
-                )
-                logger.info(f"Sent response to customer: {response['text']}")
+                if not self.response_queue.empty():
+                    response = await self.response_queue.get()
+                    await self.room.local_participant.publish_data(
+                        json.dumps(response).encode(),
+                        reliable=True
+                    )
+                    logger.info(f"Sent queued response to customer: {response['text'][:30]}...")
+                await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Error processing response queue: {e}")
-            await asyncio.sleep(0.1)  
+                await asyncio.sleep(1)
 
     async def run(self):
         """Main run loop for the agent."""
@@ -536,8 +546,11 @@ class SimpleAgent:
                 self.setup_handlers()
                 logger.info("Agent is live – press Ctrl+C to exit.")
                 
-                
+                # Start the response processor
                 response_processor = asyncio.create_task(self.process_response_queue())
+                
+                # Start the timeout checker
+                timeout_checker = asyncio.create_task(self.check_timeouts())
                 
                 while self.is_connected:
                     await asyncio.sleep(1)
@@ -546,13 +559,17 @@ class SimpleAgent:
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
         finally:
+            # Clean up tasks
+            if 'response_processor' in locals() and not response_processor.done():
+                response_processor.cancel()
+            if 'timeout_checker' in locals() and not timeout_checker.done():
+                timeout_checker.cancel()
             await self.disconnect()
 
     async def check_timeouts(self):
         """Check for timed out requests."""
         while self.is_connected:
             try:
-                
                 pending_requests = self.help_requests_ref.where('status', '==', 'pending').stream()
                 now = datetime.utcnow()
                 
@@ -561,11 +578,17 @@ class SimpleAgent:
                     timeout_at = datetime.fromisoformat(data['timeout_at'])
                     
                     if now > timeout_at:
+                        logger.info(f"Request {doc.id} has timed out")
                         
                         doc.reference.update({
                             'status': 'unresolved',
                             'updated_at': now.isoformat()
                         })
+                        
+                        # Remove from pending questions cache
+                        question_key = f"{data['question'].lower()}:{data['caller_id']}"
+                        if question_key in self.pending_questions:
+                            del self.pending_questions[question_key]
                         
                         await self.room.local_participant.publish_data(
                             json.dumps({
@@ -575,9 +598,10 @@ class SimpleAgent:
                             reliable=True
                         )
                 
-                await asyncio.sleep(60)
+                await asyncio.sleep(60)  # Check every minute
             except Exception as e:
                 logger.error(f"Error checking timeouts: {e}")
+                await asyncio.sleep(60)  # Still wait before retrying
 
 # ---------------------------------------------------------------------------
 # Interactive Client Implementation
@@ -641,53 +665,28 @@ class InteractiveClient:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
 
-    async def run(self):
-        """Main run loop for the agent."""
-        try:
-            if await self.connect():
-                self.setup_handlers()
-                logger.info("Agent is live – press Ctrl+C to exit.")
-                
-                
-                response_processor = asyncio.create_task(self.process_response_queue())
-                
-                
-                timeout_checker = asyncio.create_task(self.check_timeouts())
-                
-                while self.is_connected:
-                    await asyncio.sleep(1)
-                    
-        except KeyboardInterrupt:
-            logger.info("Shutting down agent...")
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-        finally:
-            
-            if 'response_processor' in locals() and not response_processor.done():
-                response_processor.cancel()
-            if 'timeout_checker' in locals() and not timeout_checker.done():
-                timeout_checker.cancel()
-            await self.disconnect()
+    async def disconnect(self):
+        """Disconnect from the room."""
+        if self.is_connected:
+            await self.room.disconnect()
+            self.is_connected = False
 
 class SalonChat:
     def __init__(self):
-        self.agent = SimpleAgent()
+        self.agent = SimpleAgent(asyncio.get_running_loop())
         self.client = InteractiveClient()
         self.is_running = False
 
     async def start(self):
         """Start both agent and client."""
         try:
-            
             if await self.agent.connect():
                 self.agent.setup_handlers()
                 logger.info("Agent is live")
                 
-                
                 if await self.client.connect():
                     self.client.setup_handlers()
                     self.is_running = True
-                    
                     
                     await asyncio.sleep(1)
                     
@@ -702,7 +701,6 @@ class SalonChat:
                     print("\n")
 
                     while self.is_running:
-                       
                         question = input("Your question: ").strip()
                         
                         if question.lower() == 'exit':
