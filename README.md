@@ -1,33 +1,51 @@
-# LiveKit AI Agent Simulator
+# Salon AI Assistant — Quick Start & Design Notes
+A two-part demo that shows how a **LiveKit voice/chat agent** can escalate unknown questions to a **Flask + Firebase supervisor dashboard** and build up a self-service knowledge-base on the fly.
 
-This is a basic implementation of a simulated AI agent using LiveKit. The agent can join a room and respond to basic commands.
+---
 
-## Setup
+## 1 . What’s inside
 
-1. Install the required dependencies:
+| Path | Purpose |
+|------|---------|
+| `supervisor_ui.py` | Flask admin dashboard for supervisors (resolve requests, edit KB). |
+| `ai_agent.py` | LiveKit agent / interactive CLI client (answers callers, files help-requests). |
+| `templates/index.html` | Tiny Jinja2 page listing *pending* / *resolved* tickets and KB entries. |
+| `service.json` | **Firebase** service-account key *(not committed – you provide it)*. |
+
+---
+
+## 2 . Prerequisites
+
+* **Python 3.10+** (virtual-env recommended)  
+* **Firebase Firestore** project + service-account JSON  
+* **LiveKit** cloud (or self-host) room URL + API key/secret  
+* *Optional:* `ngrok` or Cloud-flared tunnel if you need to expose Flask publicly
+
+---
+
+## 3 . Environment variables
+
+Create a `.env` file (or export in shell):
+
 ```bash
+LIVEKIT_URL=wss://<your-cloud>.livekit.cloud
+API_KEY=<livekit_api_key>
+API_SECRET=<livekit_api_secret>
+ROOM_NAME=salon
+IDENTITY=salon-agent
+```
+
+## 4 . Setup details
+
+```bash
+# clone the project and enter the directory
+git clone https://github.com/your-org/salon-ai-assistant.git
+cd salon-ai-assistant
+
+# create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
+
+# install all Python dependencies
 pip install -r requirements.txt
 ```
-
-2. Create a `.env` file with your LiveKit credentials:
-```
-LIVEKIT_API_KEY=your_api_key
-LIVEKIT_API_SECRET=your_api_secret
-LIVEKIT_URL=your_livekit_url
-```
-
-3. Run the agent:
-```bash
-python ai_agent.py
-```
-
-## Features
-
-- Connects to a LiveKit room
-- Responds to basic text commands
-- Simulates AI processing with delays
-- Handles room events and participant interactions
-
-## Usage
-
-Once the agent is running, it will join the specified room and respond to messages. You can interact with it through the LiveKit room interface. 

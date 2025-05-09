@@ -8,7 +8,7 @@ import uuid
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 
-# Make sure PyJWT is installed for token generation
+
 try:
     import jwt
 except ImportError:
@@ -17,7 +17,7 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "PyJWT"], check=True)
     import jwt
 
-# Import the LiveKit client SDK
+
 try:
     from livekit import rtc
 except ImportError:
@@ -26,7 +26,7 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "livekit"], check=True)
     from livekit import rtc
 
-# Make sure Firebase Admin SDK is installed
+
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -58,7 +58,7 @@ def create_access_token(identity: str = IDENTITY) -> str:
     """Return a signed JWT granting access to the room."""
     now = int(time.time())
     payload = {
-        "exp": now + 86400,  # 24 hours
+        "exp": now + 86400, 
         "iss": API_KEY,
         "nbf": now,
         "sub": identity,
@@ -74,25 +74,138 @@ def create_access_token(identity: str = IDENTITY) -> str:
 # ---------------------------------------------------------------------------
 
 class HelpRequest:
-    def __init__(self, question: str, caller_id: str):
+    """
+    Represents a customer question that may require supervisor assistance.
+    
+    Attributes:
+        id (str): Unique identifier for the help request
+        question (str): The original question from the customer
+        caller_id (str): Identifier for the customer who asked the question
+        status (str): Current status - "pending", "resolved", or "unresolved"
+        category (str): Categorization of the question (e.g., "hours", "pricing", "services")
+        created_at (datetime): When the request was created
+        updated_at (datetime): When the request was last updated
+        timeout_at (datetime): When the request will automatically time out
+        resolved_at (datetime): When the request was resolved (if applicable)
+        supervisor_id (str): ID of the supervisor who resolved the request (if applicable)
+        answer (str): The supervisor's answer to the question (if resolved)
+        attempts (int): Number of times this request has been attempted
+        knowledge_base_keys (List[str]): Keys in the knowledge base that were updated by this request
+    """
+    
+    STATUS_PENDING = "pending"
+    STATUS_RESOLVED = "resolved"
+    STATUS_UNRESOLVED = "unresolved"
+    
+    def __init__(self, question: str, caller_id: str, timeout_minutes: int = 30):
         self.id = str(uuid.uuid4())
         self.question = question
         self.caller_id = caller_id
-        self.status = "pending"
+        self.status = self.STATUS_PENDING
+        self.category = self._categorize_question(question)
         self.created_at = datetime.utcnow()
-        self.updated_at = datetime.utcnow()
-        self.timeout_at = self.created_at + timedelta(minutes=30)  # 30-minute timeout
+        self.updated_at = self.created_at
+        self.timeout_at = self.created_at + timedelta(minutes=timeout_minutes)
+        self.resolved_at = None
+        self.supervisor_id = None
+        self.answer = None
+        self.attempts = 1
+        self.knowledge_base_keys = []
+    
+    def _categorize_question(self, question: str) -> str:
+        """Automatically categorize the question based on content."""
+        question_lower = question.lower()
+        
 
+        categories = {
+            "hours": ["hours", "open", "close", "schedule", "when"],
+            "location": ["location", "where", "address", "directions"],
+            "pricing": ["price", "cost", "fee", "how much", "discount"],
+            "services": ["service", "offer", "provide", "treatment", "appointment"],
+            "staff": ["staff", "stylist", "employee", "who"]
+        }
+        
+
+        for category, keywords in categories.items():
+            if any(keyword in question_lower for keyword in keywords):
+                return category
+        
+        return "general"
+    
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        """Convert object to dictionary for storage."""
+        data = {
             "id": self.id,
             "question": self.question,
             "caller_id": self.caller_id,
             "status": self.status,
+            "category": self.category,
             "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat()
+            "updated_at": self.updated_at.isoformat(),
+            "timeout_at": self.timeout_at.isoformat(),
+            "attempts": self.attempts,
+            "knowledge_base_keys": self.knowledge_base_keys
         }
+        
 
+        if self.resolved_at:
+            data["resolved_at"] = self.resolved_at.isoformat()
+        if self.supervisor_id:
+            data["supervisor_id"] = self.supervisor_id
+        if self.answer:
+            data["answer"] = self.answer
+            
+        return data
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'HelpRequest':
+        """Create a HelpRequest object from dictionary data."""
+        request = cls(data["question"], data["caller_id"])
+        
+
+        request.id = data["id"]
+        request.status = data["status"]
+        request.category = data.get("category", "general")
+        request.created_at = datetime.fromisoformat(data["created_at"])
+        request.updated_at = datetime.fromisoformat(data["updated_at"])
+        request.timeout_at = datetime.fromisoformat(data["timeout_at"])
+        request.attempts = data.get("attempts", 1)
+        request.knowledge_base_keys = data.get("knowledge_base_keys", [])
+        
+        if "resolved_at" in data:
+            request.resolved_at = datetime.fromisoformat(data["resolved_at"])
+        if "supervisor_id" in data:
+            request.supervisor_id = data["supervisor_id"]
+        if "answer" in data:
+            request.answer = data["answer"]
+            
+        return request
+    
+    def mark_resolved(self, answer: str, supervisor_id: str = None):
+        """Mark this request as resolved with the given answer."""
+        self.status = self.STATUS_RESOLVED
+        self.answer = answer
+        self.resolved_at = datetime.utcnow()
+        self.updated_at = self.resolved_at
+        if supervisor_id:
+            self.supervisor_id = supervisor_id
+    
+    def mark_unresolved(self, reason: str = "timeout"):
+        """Mark this request as unresolved."""
+        self.status = self.STATUS_UNRESOLVED
+        self.updated_at = datetime.utcnow()
+    
+    def update_timeout(self, timeout_minutes: int):
+        """Update the timeout for this request."""
+        self.timeout_at = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+        self.updated_at = datetime.utcnow()
+    
+    def add_knowledge_base_key(self, key: str):
+        """Add a knowledge base key that was updated by this request."""
+        if key not in self.knowledge_base_keys:
+            self.knowledge_base_keys.append(key)
+            self.updated_at = datetime.utcnow()
+            
 # ---------------------------------------------------------------------------
 # Simple Agent Implementation
 # ---------------------------------------------------------------------------
@@ -102,12 +215,12 @@ class SimpleAgent:
         self.room = rtc.Room()
         self.is_connected = False
         
-        # Initialize Firebase
+
         try:
-            # Check if Firebase is already initialized
+
             firebase_admin.get_app()
         except ValueError:
-            # Initialize Firebase with service account
+
             cred = credentials.Certificate('service.json')
             firebase_admin.initialize_app(cred)
         
@@ -115,14 +228,17 @@ class SimpleAgent:
         self.help_requests_ref = self.db.collection('help_requests')
         self.knowledge_base_ref = self.db.collection('knowledge_base')
         
-        # Load knowledge base from Firebase
+
         self.knowledge_base = self.load_knowledge_base()
-        
-        # Create a queue for pending responses
+
         self.response_queue = asyncio.Queue()
         
-        # Set up listener for resolved requests
+
         self.setup_resolved_requests_listener()
+        
+
+        self.last_kb_refresh = datetime.utcnow()
+        self.kb_refresh_interval = timedelta(minutes=5)
 
     def load_knowledge_base(self) -> dict:
         """Load knowledge base from Firebase."""
@@ -131,6 +247,7 @@ class SimpleAgent:
         for doc in docs:
             data = doc.to_dict()
             knowledge_base[doc.id] = data['answer']
+        logger.info(f"Loaded {len(knowledge_base)} entries from knowledge base")
         return knowledge_base
 
     def save_knowledge_base_entry(self, key: str, answer: str):
@@ -140,6 +257,7 @@ class SimpleAgent:
             'updated_at': datetime.utcnow().isoformat()
         })
 
+    
     def setup_resolved_requests_listener(self):
         """Set up a listener for resolved help requests to update knowledge base."""
         def on_snapshot(doc_snapshot, changes, read_time):
@@ -148,39 +266,73 @@ class SimpleAgent:
                     doc = change.document
                     data = doc.to_dict()
                     if data.get('status') == 'resolved' and 'answer' in data:
-                        self.update_knowledge_base(data['question'], data['answer'])
-                        # Add response to queue instead of creating task directly
-                        self.response_queue.put_nowait({
-                            "text": data['answer'],
-                            "caller_id": data['caller_id']
-                        })
 
-        # Watch the collection for changes
+                        self.update_knowledge_base(data['question'], data['answer'])
+                        
+                        if 'caller_id' in data:
+                            logger.info(f"Queuing response for caller: {data['caller_id']}")
+                            asyncio.create_task(self.send_response_to_caller(
+                                data['answer'],
+                                data['caller_id']
+                            ))
+                        else:
+                            logger.error(f"No caller_id found in resolved request: {doc.id}")
+
+
         self.help_requests_ref.on_snapshot(on_snapshot)
 
+    async def send_response_to_caller(self, answer: str, caller_id: str):
+        """Send a response directly to the caller who asked the question."""
+        try:
+
+            participants = self.room.participants
+            
+
+            response_data = {
+                "text": answer,
+                "caller_id": caller_id
+            }
+            
+
+            await self.room.local_participant.publish_data(
+                json.dumps(response_data).encode(),
+                reliable=True
+            )
+            
+            logger.info(f"Sent supervisor response to caller {caller_id}: {answer[:30]}...")
+        except Exception as e:
+            logger.error(f"Error sending response to caller {caller_id}: {e}")
+            
+            self.response_queue.put_nowait({
+                "text": answer,
+                "caller_id": caller_id
+            })
+            
     def update_knowledge_base(self, question: str, answer: str):
         """Update the knowledge base with new information."""
-        # Convert question to lowercase for matching
+        
         question_lower = question.lower()
         
-        # Extract meaningful key phrases from the question
+        
         words = question_lower.split()
         
-        # Remove common question words
+
         question_words = {'what', 'when', 'where', 'who', 'why', 'how', 'do', 'does', 'is', 'are', 'can', 'could', 'would', 'should'}
         meaningful_words = [w for w in words if w not in question_words]
         
-        if len(meaningful_words) >= 2:
-            # Use the first two meaningful words as the key
-            key = ' '.join(meaningful_words[:2])
-        elif meaningful_words:
-            # If only one meaningful word, use it with the first question word
-            key = f"{words[0]} {meaningful_words[0]}"
+
+        if 'hours' in question_lower:
+            key = 'hours'
+        elif 'location' in question_lower or 'where' in question_lower:
+            key = 'location'
+        elif 'price' in question_lower or 'cost' in question_lower:
+            key = 'pricing'
+        elif 'service' in question_lower or 'offer' in question_lower:
+            key = 'services'
         else:
-            # Fallback to first two words if no meaningful words found
-            key = ' '.join(words[:2])
-        
-        # Update or create knowledge base entry
+
+            key = ' '.join(meaningful_words[:2]) if meaningful_words else ' '.join(words[:2])
+
         self.knowledge_base[key] = answer
         self.save_knowledge_base_entry(key, answer)
         logger.info(f"Updated knowledge base entry for '{key}'")
@@ -213,7 +365,7 @@ class SimpleAgent:
         """Create a new help request in Firebase and notify supervisor."""
         help_request = HelpRequest(question, caller_id)
         
-        # Store in Firebase
+        
         try:
             self.help_requests_ref.document(help_request.id).set(help_request.to_dict())
             logger.info(f"Help request stored in Firebase with ID: {help_request.id}")
@@ -221,7 +373,7 @@ class SimpleAgent:
             logger.error(f"Failed to store help request in Firebase: {e}")
             raise
         
-        # Simulate texting supervisor
+        
         logger.info(f"SUPERVISOR NOTIFICATION: Hey, I need help answering: '{question}'")
         
         return help_request
@@ -231,7 +383,7 @@ class SimpleAgent:
         @self.room.on("participant_joined")
         def _on_participant_joined(participant):
             logger.info(f"Call received from: {participant.identity}")
-            # Send welcome message
+           
             asyncio.create_task(
                 self.room.local_participant.publish_data(
                     json.dumps({"text": "Hello! I'm the salon assistant. How can I help you today?"}).encode(),
@@ -251,13 +403,13 @@ class SimpleAgent:
                 message = message_bytes.decode('utf-8')
                 logger.info(f"Received message: {message}")
                 
-                # Process the message asynchronously
+                
                 async def process_and_respond():
                     try:
                         response = await self._process_message(message)
                         logger.info(f"Generated response: {response}")
                         
-                        # Send response
+                        
                         await self.room.local_participant.publish_data(
                             json.dumps({"text": response}).encode(),
                             reliable=True
@@ -266,7 +418,7 @@ class SimpleAgent:
                     except Exception as e:
                         logger.error(f"Error in async processing: {e}")
 
-                # Create task for async processing
+                
                 asyncio.create_task(process_and_respond())
                 
             except Exception as e:
@@ -276,35 +428,78 @@ class SimpleAgent:
         def _on_disconnected():
             logger.info("Disconnected from room")
 
+    async def refresh_knowledge_base(self):
+        """Refresh knowledge base if enough time has passed."""
+        now = datetime.utcnow()
+        if now - self.last_kb_refresh >= self.kb_refresh_interval:
+            self.knowledge_base = self.load_knowledge_base()
+            self.last_kb_refresh = now
+            logger.info("Knowledge base refreshed")
+
     async def _process_message(self, message: str) -> str:
         """Process incoming message and return appropriate response."""
         try:
+            
+            await self.refresh_knowledge_base()
+            
             data = json.loads(message)
             query = data.get("text", "").lower()
             caller_id = data.get("caller_id", "unknown")
             logger.info(f"Processing query: {query}")
             
-            # Check if we know the answer
+            
             best_match = None
             best_match_score = 0
             
+            
+            if 'hours' in query and 'hours' in self.knowledge_base:
+                return self.knowledge_base['hours']
+            elif ('location' in query or 'where' in query) and 'location' in self.knowledge_base:
+                return self.knowledge_base['location']
+            elif ('price' in query or 'cost' in query) and 'pricing' in self.knowledge_base:
+                return self.knowledge_base['pricing']
+            elif ('service' in query or 'offer' in query) and 'services' in self.knowledge_base:
+                return self.knowledge_base['services']
+            
+            query_words = set(query.split())
+            
             for key, answer in self.knowledge_base.items():
-                # Calculate match score based on key presence and position
-                if key in query:
-                    # Give higher score if key is at the start of the query
-                    score = 1.0 if query.startswith(key) else 0.5
-                    # Give higher score for longer matching keys
-                    score *= len(key) / len(query)
+            
+                key_words = set(key.split())
+                
+                
+                common_words = query_words.intersection(key_words)
+                
+                if common_words:
+                
+                    score = len(common_words) / max(len(query_words), len(key_words))
+                    
+                    
+                    if key in query:
+                        score += 0.3
+                    
+                    for word in key_words:
+                        if query.startswith(word):
+                            score += 0.2
+                            break
+                    
                     if score > best_match_score:
                         best_match_score = score
                         best_match = answer
             
-            # Only return a match if it's a strong match (score > 0.3)
-            if best_match and best_match_score > 0.3:
+            
+            if best_match and best_match_score > 0.2:
                 logger.info(f"Found matching answer with score: {best_match_score}")
                 return best_match
             
-            # If we don't know the answer, create help request
+            
+            if not best_match:
+                for key, answer in self.knowledge_base.items():
+                    if key in query:
+                        logger.info(f"Found substring match for key: {key}")
+                        return answer
+            
+            
             try:
                 help_request = await self.create_help_request(query, caller_id)
                 logger.info(f"Created help request: {help_request.to_dict()}")
@@ -319,7 +514,7 @@ class SimpleAgent:
         except Exception as e:
             logger.error(f"Error in message processing: {e}")
             return "I encountered an error processing your message. Please try again."
-
+    
     async def process_response_queue(self):
         """Process responses from the queue."""
         while self.is_connected:
@@ -332,7 +527,7 @@ class SimpleAgent:
                 logger.info(f"Sent response to customer: {response['text']}")
             except Exception as e:
                 logger.error(f"Error processing response queue: {e}")
-            await asyncio.sleep(0.1)  # Small delay to prevent CPU spinning
+            await asyncio.sleep(0.1)  
 
     async def run(self):
         """Main run loop for the agent."""
@@ -341,7 +536,7 @@ class SimpleAgent:
                 self.setup_handlers()
                 logger.info("Agent is live – press Ctrl+C to exit.")
                 
-                # Start the response queue processor
+                
                 response_processor = asyncio.create_task(self.process_response_queue())
                 
                 while self.is_connected:
@@ -357,7 +552,7 @@ class SimpleAgent:
         """Check for timed out requests."""
         while self.is_connected:
             try:
-                # Get all pending requests
+                
                 pending_requests = self.help_requests_ref.where('status', '==', 'pending').stream()
                 now = datetime.utcnow()
                 
@@ -366,12 +561,12 @@ class SimpleAgent:
                     timeout_at = datetime.fromisoformat(data['timeout_at'])
                     
                     if now > timeout_at:
-                        # Mark as unresolved
+                        
                         doc.reference.update({
                             'status': 'unresolved',
                             'updated_at': now.isoformat()
                         })
-                        # Notify customer
+                        
                         await self.room.local_participant.publish_data(
                             json.dumps({
                                 "text": "I apologize, but I haven't received a response from my supervisor yet. Please try asking your question again or contact us directly.",
@@ -380,7 +575,7 @@ class SimpleAgent:
                             reliable=True
                         )
                 
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(60)
             except Exception as e:
                 logger.error(f"Error checking timeouts: {e}")
 
@@ -447,44 +642,32 @@ class InteractiveClient:
             logger.error(f"Error sending message: {e}")
 
     async def run(self):
-        """Main run loop for the interactive client."""
+        """Main run loop for the agent."""
         try:
             if await self.connect():
                 self.setup_handlers()
+                logger.info("Agent is live – press Ctrl+C to exit.")
                 
-                # Wait a moment for room to stabilize
-                await asyncio.sleep(1)
                 
-                print("\nWelcome to the Salon Chat Client!")
-                print("Type your questions about the salon (type 'exit' to quit)")
-                print("Example questions:")
-                print("- What are your hours?")
-                print("- Where are you located?")
-                print("- How much is a basic haircut?")
-                print("- What's the price for coloring?")
-                print("- Do you offer massages?")
-                print("\n")
-
-                while True:
-                    # Get user input
-                    question = input("Your question: ").strip()
+                response_processor = asyncio.create_task(self.process_response_queue())
+                
+                
+                timeout_checker = asyncio.create_task(self.check_timeouts())
+                
+                while self.is_connected:
+                    await asyncio.sleep(1)
                     
-                    if question.lower() == 'exit':
-                        break
-                        
-                    if question:
-                        await self.send_message(question)
-                        # Wait a moment for response
-                        await asyncio.sleep(1)
-                
         except KeyboardInterrupt:
-            logger.info("Shutting down client...")
+            logger.info("Shutting down agent...")
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
         finally:
-            if self.is_connected:
-                await self.room.disconnect()
-                logger.info("Disconnected from room")
+            
+            if 'response_processor' in locals() and not response_processor.done():
+                response_processor.cancel()
+            if 'timeout_checker' in locals() and not timeout_checker.done():
+                timeout_checker.cancel()
+            await self.disconnect()
 
 class SalonChat:
     def __init__(self):
@@ -495,17 +678,17 @@ class SalonChat:
     async def start(self):
         """Start both agent and client."""
         try:
-            # Start the agent first
+            
             if await self.agent.connect():
                 self.agent.setup_handlers()
                 logger.info("Agent is live")
                 
-                # Then start the client
+                
                 if await self.client.connect():
                     self.client.setup_handlers()
                     self.is_running = True
                     
-                    # Wait a moment for room to stabilize
+                    
                     await asyncio.sleep(1)
                     
                     print("\nWelcome to the Salon Chat!")
@@ -519,7 +702,7 @@ class SalonChat:
                     print("\n")
 
                     while self.is_running:
-                        # Get user input
+                       
                         question = input("Your question: ").strip()
                         
                         if question.lower() == 'exit':
@@ -527,7 +710,7 @@ class SalonChat:
                             
                         if question:
                             await self.client.send_message(question)
-                            # Wait a moment for response
+                            
                             await asyncio.sleep(1)
                 
         except KeyboardInterrupt:
